@@ -22,16 +22,16 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon assembleRelease
-          cp app/build/outputs/apk/release/app-release.apk KitapOkuyucu.apk
+          cp app/build/outputs/apk/release/app-release.apk KitapMelegi.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: KitapOkuyucu
-          path: KitapOkuyucu.apk
+          name: KitapMelegi
+          path: KitapMelegi.apk
       - name: Sürüm yayınla
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
-          name: Kitap Okuyucu 1.0.${{ github.run_number }}
-          body: Tablete kurmak için aşağıdaki KitapOkuyucu.apk dosyasını indir.
-          files: KitapOkuyucu.apk
+          name: Kitap Meleği 1.0.${{ github.run_number }}
+          body: Tablete kurmak için aşağıdaki KitapMelegi.apk dosyasını indir.
+          files: KitapMelegi.apk
           make_latest: true

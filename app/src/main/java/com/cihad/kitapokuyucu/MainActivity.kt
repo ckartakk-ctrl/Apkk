@@ -131,26 +131,32 @@ class MainActivity : Activity() {
         return name ?: uri.lastPathSegment ?: "kitap.epub"
     }
 
-    /** Seçilen EPUB'u uygulamanın kendi klasörüne kopyalar; böylece kitap kitaplıkta kalır. */
+    /** Seçilen EPUB ya da PDF'i uygulamanın kendi klasörüne kopyalar; böylece kitap kitaplıkta kalır. */
     private fun importBook(uri: Uri) {
         Thread {
             try {
                 val original = displayName(uri)
-                val safe = original.replace(Regex("[^A-Za-z0-9._-]"), "_").takeLast(60)
-                val id = System.currentTimeMillis().toString(36) + "_" +
-                        (if (safe.endsWith(".epub", true)) safe else "$safe.epub")
-                val target = File(booksDir, id)
+                val tmp = File(booksDir, "import.tmp")
                 contentResolver.openInputStream(uri)!!.use { input ->
-                    target.outputStream().use { input.copyTo(it) }
+                    tmp.outputStream().use { input.copyTo(it) }
                 }
-                // EPUB bir zip dosyasıdır: ilk iki bayt "PK" olmalı
-                val head = ByteArray(2)
-                target.inputStream().use { it.read(head) }
-                if (head[0] != 'P'.code.toByte() || head[1] != 'K'.code.toByte()) {
-                    target.delete()
-                    js("window.onImportError(${JSONObject.quote("Bu dosya bir EPUB değil: $original")})")
+                // Tür dosyanın ilk baytlarından anlaşılır: EPUB bir zip'tir ("PK"), PDF "%PDF" ile başlar
+                val head = ByteArray(4)
+                tmp.inputStream().use { it.read(head) }
+                val ext = when {
+                    head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte() -> ".epub"
+                    String(head, Charsets.ISO_8859_1) == "%PDF" -> ".pdf"
+                    else -> null
+                }
+                if (ext == null) {
+                    tmp.delete()
+                    js("window.onImportError(${JSONObject.quote("Bu dosya EPUB ya da PDF değil: $original")})")
                     return@Thread
                 }
+                val safe = original.replace(Regex("\\.(epub|pdf)$", RegexOption.IGNORE_CASE), "")
+                    .replace(Regex("[^A-Za-z0-9._-]"), "_").takeLast(50)
+                val id = System.currentTimeMillis().toString(36) + "_" + safe + ext
+                tmp.renameTo(File(booksDir, id))
                 File(booksDir, "$id.name").writeText(original)
                 js("window.onBookImported(${JSONObject.quote(id)})")
             } catch (e: Exception) {
@@ -165,7 +171,7 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun listBooks(): String {
             val arr = JSONArray()
-            booksDir.listFiles { f -> f.name.endsWith(".epub", true) }
+            booksDir.listFiles { f -> f.name.endsWith(".epub", true) || f.name.endsWith(".pdf", true) }
                 ?.sortedByDescending { it.lastModified() }
                 ?.forEach { f ->
                     val nameFile = File(booksDir, f.name + ".name")
@@ -180,7 +186,7 @@ class MainActivity : Activity() {
             val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
                 type = "*/*"
-                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/epub+zip", "application/octet-stream", "application/zip"))
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/epub+zip", "application/pdf", "application/octet-stream", "application/zip"))
             }
             @Suppress("DEPRECATION")
             startActivityForResult(i, PICK)

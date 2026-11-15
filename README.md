@@ -1,8 +1,8 @@
-# Kitap Okuyucu
+# Kitap Meleği
 
-Tablet için EPUB kitap okuma uygulaması (Android).
+Tablet için EPUB ve PDF kitap okuma uygulaması (Android).
 
-- EPUB dosyasını seç, kitaplığa eklensin
+- EPUB ya da PDF dosyasını seç, kitaplığa eklensin
 - Her sayfa tek ekranda; parmakla sürüklenen, kıvrılan sayfa efekti
 - Kitaptaki resimler ve tam sayfa kapaklar
 - Kelime / cümle işaretleme (4 renk), işaretlere not ekleme, işarete dokununca notu görme
@@ -13,6 +13,6 @@ Tablet için EPUB kitap okuma uygulaması (Android).
 
 ## İndir
 
-Son sürüm: [KitapOkuyucu.apk](https://github.com/ckartakk-ctrl/Apkk/releases/latest/download/KitapOkuyucu.apk)
+Son sürüm: [KitapMelegi.apk](https://github.com/ckartakk-ctrl/Apkk/releases/latest/download/KitapMelegi.apk)
 
 `main` dalına yapılan her yüklemede GitHub Actions APK'yı yeniden derler ve yeni sürüm olarak yayınlar.

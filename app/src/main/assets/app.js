@@ -174,6 +174,8 @@ class Epub {
     return frag;
   }
 
+  async text(i) { return (await this.fragment(i)).textContent; }
+
   async coverThumb() {
     if (!this.coverPath || !this.file(this.coverPath)) return '';
     try {
@@ -188,6 +190,127 @@ class Epub {
   }
 
   dispose() { this.urls.forEach(u => u && URL.revokeObjectURL(u)); }
+}
+
+
+/* ---------------- PDF ---------------- */
+
+/** PDF sayfasındaki yazı parçalarının metni (arama ve işaret konumları bununla sayılır) */
+const pdfStr = it => it.str + (it.hasEOL ? ' ' : '');
+
+class PdfBook {
+  static async open(url) {
+    const b = new PdfBook();
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
+    b.doc = await pdfjsLib.getDocument({ url, standardFontDataUrl: 'standard_fonts/' }).promise;
+    b.isPdf = true;
+    b.spine = Array.from({ length: b.doc.numPages }, (_, i) => 'sayfa' + i);
+    b.title = ''; b.author = ''; b.lang = ''; b.toc = [];
+    try {
+      const md = await b.doc.getMetadata();
+      b.title = ((md.info && md.info.Title) || '').trim();
+      b.author = ((md.info && md.info.Author) || '').trim();
+    } catch (e) {}
+    try {
+      const walk = async (items, depth) => {
+        for (const it of items || []) {
+          if (b.toc.length > 400) return;
+          try {
+            let dest = it.dest;
+            if (typeof dest === 'string') dest = await b.doc.getDestination(dest);
+            if (Array.isArray(dest)) {
+              const ch = typeof dest[0] === 'object' ? await b.doc.getPageIndex(dest[0]) : dest[0];
+              if (it.title && ch >= 0) b.toc.push({ label: it.title.trim(), ch, depth, frag: '' });
+            }
+          } catch (e) {}
+          await walk(it.items, depth + 1);
+        }
+      };
+      await walk(await b.doc.getOutline(), 0);
+    } catch (e) {}
+    b.cache = new Map(); b.texts = new Map();
+    return b;
+  }
+
+  chapterTitle(ch) {
+    let best = '';
+    for (const t of this.toc) if (t.ch <= ch) best = t.label;
+    return best || ('Sayfa ' + (ch + 1));
+  }
+
+  async text(i) {
+    if (this.texts.has(i)) return this.texts.get(i);
+    const tc = await (await this.doc.getPage(i + 1)).getTextContent();
+    const t = tc.items.filter(it => it.str != null).map(pdfStr).join('');
+    this.texts.set(i, t);
+    if (this.texts.size > 600) this.texts.delete(this.texts.keys().next().value);
+    return t;
+  }
+
+  /** Sayfayı ekrana sığacak boyutta resme çevirir, üstüne seçilebilir görünmez yazı katmanı koyar. */
+  async fragment(i) {
+    if (this.cache.has(i)) { const hit = this.cache.get(i); this.cache.delete(i); this.cache.set(i, hit); return hit.frag; }
+    const page = await this.doc.getPage(i + 1);
+    const boxW = sheetA.clip.clientWidth, boxH = sheetA.clip.clientHeight - 2;
+    const v1 = page.getViewport({ scale: 1 });
+    const s = Math.min(boxW / v1.width, boxH / v1.height);
+    let rs = s * Math.min(window.devicePixelRatio || 1, 2);
+    rs = Math.min(rs, Math.sqrt(6e6 / (v1.width * v1.height)));          // en çok ~6 megapiksel
+    const vp = page.getViewport({ scale: rs });
+    const cv = document.createElement('canvas');
+    cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
+    const g = cv.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height);
+    await page.render({ canvasContext: g, viewport: vp }).promise;
+    const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.92));
+    const url = URL.createObjectURL(blob);
+    cv.width = cv.height = 0;
+
+    const cssVp = page.getViewport({ scale: s });
+    const wrap = document.createElement('div'); wrap.className = 'pdfwrap';
+    const pg = document.createElement('div'); pg.className = 'pdfpage';
+    pg.style.width = Math.floor(cssVp.width) + 'px'; pg.style.height = Math.floor(cssVp.height) + 'px';
+    const img = document.createElement('img'); img.src = url; img.alt = '';
+    const layer = document.createElement('div'); layer.className = 'pdftext';
+    try {
+      const tc = await page.getTextContent();
+      const m = document.createElement('canvas').getContext('2d');
+      for (const it of tc.items) {
+        if (it.str == null) continue;
+        const tx = pdfjsLib.Util.transform(cssVp.transform, it.transform);
+        const fh = Math.hypot(tx[2], tx[3]) || 10;
+        const sp = document.createElement('span');
+        sp.textContent = pdfStr(it);
+        sp.style.left = tx[4].toFixed(1) + 'px';
+        sp.style.top = (tx[5] - fh * 0.82).toFixed(1) + 'px';
+        sp.style.fontSize = fh.toFixed(1) + 'px';
+        m.font = fh.toFixed(1) + 'px sans-serif';
+        const w = m.measureText(it.str).width, target = it.width * s;
+        if (w > 0 && target > 0) sp.style.transform = 'scaleX(' + (target / w).toFixed(4) + ')';
+        layer.append(sp);
+      }
+    } catch (e) {}
+    pg.append(img, layer); wrap.append(pg);
+    const frag = document.createDocumentFragment(); frag.append(wrap);
+    this.cache.set(i, { frag, url });
+    if (this.cache.size > 8) { const k = this.cache.keys().next().value; URL.revokeObjectURL(this.cache.get(k).url); this.cache.delete(k); }
+    return frag;
+  }
+
+  clearPages() { this.cache.forEach(v => URL.revokeObjectURL(v.url)); this.cache.clear(); }
+
+  async coverThumb() {
+    try {
+      const page = await this.doc.getPage(1), v1 = page.getViewport({ scale: 1 });
+      const vp = page.getViewport({ scale: 240 / v1.width });
+      const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+      const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+      await page.render({ canvasContext: g, viewport: vp }).promise;
+      return c.toDataURL('image/jpeg', 0.72);
+    } catch (e) { return ''; }
+  }
+
+  dispose() { this.clearPages(); try { this.doc.destroy(); } catch (e) {} }
 }
 
 /* ---------------- Sayfa katmanı ---------------- */
@@ -300,6 +423,7 @@ async function countPages() {
   const sig = layoutSig();
   if (P.sig === sig) return;
   P.sig = sig; P.done = false; const job = ++P.job, book = R.book, n = book.spine.length;
+  if (book.isPdf) { setCounts(new Array(n).fill(1)); return refreshPages(); }
   const m = meta[R.id] || {};
   if (m.pc && m.pc.sig === sig && m.pc.counts.length === n) { setCounts(m.pc.counts); return refreshPages(); }
   refreshPages();
@@ -616,7 +740,7 @@ function expandToSentence() {
     const pre = document.createRange(); pre.selectNodeContents(flow); pre.setEndBefore(el);
     const st = pre.toString().length; return [st, st + el.textContent.length];
   };
-  const lo = span(block(sr.startContainer))[0], hi = span(block(sr.endContainer))[1];
+  const lo = R.book.isPdf ? 0 : span(block(sr.startContainer))[0], hi = R.book.isPdf ? T.length : span(block(sr.endContainer))[1];
   const END = /[.!?…]/, TAIL = /[.!?…"”’'»)\]]/;
   let a = s.start, b = s.end;
   while (a > lo && !(END.test(T[a - 1]) && /\s/.test(T[a] || ' '))) a--;
@@ -829,7 +953,7 @@ function renderLibrary() {
   $('#libCount').textContent = books.length ? books.length + ' kitap · ' + marks.length + ' işaret' : '';
   for (const b of books) {
     const m = meta[b.id] || {};
-    const title = m.title || b.name.replace(/\.epub$/i, '');
+    const title = m.title || b.name.replace(/\.(epub|pdf)$/i, '');
     const card = document.createElement('div'); card.className = 'book';
     const cover = document.createElement('div'); cover.className = 'cover';
     if (m.cover) cover.style.backgroundImage = 'url(' + m.cover + ')'; else cover.textContent = title;
@@ -857,12 +981,16 @@ async function openBook(id, jump) {
       if (R.book) R.book.dispose();
       R.book = null; P.sig = ''; P.done = false; P.job++;
       [sheetA, sheetB, sheetM].forEach(s => { s.ch = -1; s.page = 0; });
-      const res = await fetch(bridge.url(id));
-      if (!res.ok) throw new Error('Dosya okunamadı');
-      const book = await Epub.open(await res.arrayBuffer());
+      let book;
+      if (/\.pdf$/i.test(id)) book = await PdfBook.open(bridge.url(id));
+      else {
+        const res = await fetch(bridge.url(id));
+        if (!res.ok) throw new Error('Dosya okunamadı');
+        book = await Epub.open(await res.arrayBuffer());
+      }
       R.book = book; R.id = id;
       const m = meta[id] || (meta[id] = {});
-      m.title = book.title || m.title || id.replace(/\.epub$/i, '');
+      m.title = book.title || m.title || (bridge.list().find(b => b.id === id) || { name: id }).name.replace(/\.(epub|pdf)$/i, '');
       m.author = book.author || '';
       if (!m.cover) m.cover = await book.coverThumb();
       store.set('books', meta);
@@ -912,14 +1040,14 @@ $$('.panel .close').forEach(b => { b.onclick = closePanels; });
 
 function renderToc() {
   const list = $('#tocList'); list.replaceChildren();
-  const toc = R.book.toc.length ? R.book.toc : R.book.spine.map((p, i) => ({ label: 'Bölüm ' + (i + 1), ch: i, depth: 0, frag: '' }));
+  const toc = R.book.toc.length ? R.book.toc : R.book.spine.map((p, i) => ({ label: R.book.chapterTitle(i), ch: i, depth: 0, frag: '' }));
   let curIdx = -1;
   toc.forEach((t, i) => { if (t.ch <= R.cur.ch) curIdx = i; });
   toc.forEach((t, i) => {
     const b = document.createElement('button');
     b.className = 'toc-item' + (i === curIdx ? ' cur' : '');
     b.style.paddingLeft = (t.depth * 18) + 'px';
-    b.textContent = t.label + (P.done ? '  ·  s. ' + (P.starts[t.ch] + 1) : '');
+    b.textContent = t.label + (P.done && !/^Sayfa \d+$/.test(t.label) ? '  ·  s. ' + (P.starts[t.ch] + 1) : '');
     b.onclick = () => { closePanels(); goTo({ ch: t.ch, anchor: t.frag }); };
     list.append(b);
   });
@@ -996,7 +1124,7 @@ async function doSearch() {
   let count = 0;
   for (let ch = 0; ch < book.spine.length && count < 200; ch++) {
     info.textContent = 'Aranıyor… %' + Math.round(ch / book.spine.length * 100);
-    const T = (await book.fragment(ch)).textContent, L = low(T);
+    const T = await book.text(ch), L = low(T);
     if (job !== searchJob || R.book !== book) return;
     if (L.length !== T.length) continue;
     for (let i = L.indexOf(q); i >= 0 && count < 200; i = L.indexOf(q, i + q.length)) {
@@ -1046,14 +1174,18 @@ function applyPrefs(relayout) {
   st.setProperty('--font-size', prefs.font + 'px');
   st.setProperty('--line-height', prefs.line);
   st.setProperty('--pad-x', Math.round(pad) + 'px');
-  document.body.className = 'theme-' + prefs.theme;
+  document.body.className = 'theme-' + prefs.theme + (R.book && R.book.isPdf ? ' pdfmode' : '');
   paper = getComputedStyle(document.body).getPropertyValue('--page').trim() || '#f8f1e3';
   sizeCurl();
   $('#fontVal').textContent = prefs.font + ' pt';
   const seg = (id, v) => $$(id + ' button').forEach(b => b.classList.toggle('on', b.dataset.v === String(v)));
   seg('#segLine', prefs.line); seg('#segTheme', prefs.theme); seg('#segFlip', prefs.flip); seg('#segMargin', prefs.margin); seg('#segTr', prefs.tr);
   store.set('prefs', prefs);
-  if (relayout && R.book && !$('#reader').hidden && !R.busy) {
+  if (relayout && R.book && R.book.isPdf && !$('#reader').hidden && !R.busy) {
+    // PDF sayfaları yeni ekran boyutuna göre yeniden çizilir
+    const ch = R.cur.ch; R.book.clearPages(); sheetA.ch = sheetB.ch = -1;
+    goTo({ ch });
+  } else if (relayout && R.book && !$('#reader').hidden && !R.busy) {
     const s = R.cur, pos = meta[R.id] && meta[R.id].pos;
     s.layout();
     if (pos && pos.ch === s.ch && pos.off != null) s.show(s.pageOfOffset(pos.off));
