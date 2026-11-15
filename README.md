@@ -1,19 +1,14 @@
-# FocusRead
+# Kitap Okuyucu
 
-Tüm özellikler herkese açıktır (Premium/abonelik yoktur): PDF/EPUB/TXT içe aktarma,
-100–1000 WPM hız aralığı, istatistikler, kalıcı ilerleme.
+Tablet için EPUB kitap okuma uygulaması (Android).
 
-## APK alma
-**GitHub Actions (kurulumsuz):** Bu klasörün içeriğini bir GitHub deposuna yükle →
-Actions sekmesi → "Build APK" çalışsın → altta `focusread-apk` dosyasını indir.
+- EPUB dosyasını seç, kitaplığa eklensin
+- Her sayfa tek ekranda, sayfa çevirme efektiyle
+- Cümle işaretleme (4 renk) ve tüm işaretlerin tek listede görünmesi
+- İçindekiler, yazı boyutu, satır aralığı, kâğıt / beyaz / gece teması
 
-**Kendi bilgisayarında:**
-```bash
-flutter create . --platforms=android
-flutter pub get
-flutter build apk --release
-```
-APK: `build/app/outputs/flutter-apk/app-release.apk`
+## İndir
 
-Not: Kod burada derlenemedi; ilk derlemede küçük bir hata çıkarsa
-(özellikle `epubx` API'si) hata mesajını paylaşırsan düzeltirim.
+Son sürüm: [KitapOkuyucu.apk](https://github.com/ckartakk-ctrl/Apkk/releases/latest/download/KitapOkuyucu.apk)
+
+`main` dalına yapılan her yüklemede GitHub Actions APK'yı yeniden derler ve yeni sürüm olarak yayınlar.

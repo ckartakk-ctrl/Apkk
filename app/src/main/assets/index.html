@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Kitap Okuyucu</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="theme-paper">
+
+<!-- KİTAPLIK -->
+<section id="library">
+  <header class="lib-head">
+    <div>
+      <h1>Kitaplığım</h1>
+      <p id="libCount" class="muted"></p>
+    </div>
+    <div class="lib-actions">
+      <button id="btnAllMarks" class="btn ghost">İşaretlerim</button>
+      <button id="btnAdd" class="btn solid">Kitap ekle</button>
+    </div>
+  </header>
+  <div id="bookGrid" class="grid"></div>
+  <div id="libEmpty" class="empty" hidden>
+    <div class="empty-book"></div>
+    <h2>Henüz kitap yok</h2>
+    <p>Tabletindeki bir EPUB dosyasını seç, okumaya başla.</p>
+    <button id="btnAdd2" class="btn solid">EPUB dosyası seç</button>
+  </div>
+</section>
+
+<!-- OKUYUCU -->
+<section id="reader" hidden>
+  <div id="stage">
+    <div class="sheet" id="sheetA">
+      <div class="clip"><div class="flow"></div></div>
+      <div class="foot"><span class="foot-ch"></span><span class="foot-pg"></span></div>
+      <div class="shade"></div>
+    </div>
+    <div class="sheet" id="sheetB">
+      <div class="clip"><div class="flow"></div></div>
+      <div class="foot"><span class="foot-ch"></span><span class="foot-pg"></span></div>
+      <div class="shade"></div>
+    </div>
+  </div>
+
+  <div id="topbar" class="bar" hidden>
+    <button id="btnBack" class="icon" aria-label="Kitaplığa dön">‹</button>
+    <div id="barTitle" class="bar-title"></div>
+    <button id="btnToc" class="btn ghost small">İçindekiler</button>
+    <button id="btnMarks" class="btn ghost small">İşaretlerim</button>
+    <button id="btnSet" class="btn ghost small">Aa</button>
+  </div>
+
+  <div id="bottombar" class="bar bottom" hidden>
+    <span id="progText" class="muted"></span>
+    <div class="prog"><div id="progFill"></div></div>
+  </div>
+
+  <div id="selbar" hidden>
+    <span class="sel-label">İşaretle</span>
+    <button class="dot" data-color="yellow" aria-label="Sarı"></button>
+    <button class="dot" data-color="green" aria-label="Yeşil"></button>
+    <button class="dot" data-color="blue" aria-label="Mavi"></button>
+    <button class="dot" data-color="pink" aria-label="Pembe"></button>
+    <button id="btnSentence" class="btn ghost small">Cümleyi seç</button>
+  </div>
+
+  <div id="markPop" hidden>
+    <p id="markPopText"></p>
+    <div class="row">
+      <button id="btnMarkDel" class="btn danger small">İşareti kaldır</button>
+      <button id="btnMarkClose" class="btn ghost small">Kapat</button>
+    </div>
+  </div>
+
+  <div id="loading" hidden><div class="spin"></div><span>Kitap açılıyor…</span></div>
+</section>
+
+<!-- PANELLER -->
+<div id="scrim" hidden></div>
+
+<aside id="panelToc" class="panel" hidden>
+  <header><h2>İçindekiler</h2><button class="icon close" aria-label="Kapat">×</button></header>
+  <div id="tocList" class="panel-body"></div>
+</aside>
+
+<aside id="panelMarks" class="panel" hidden>
+  <header>
+    <h2 id="marksTitle">İşaretlerim</h2>
+    <button id="btnShare" class="btn ghost small">Paylaş</button>
+    <button class="icon close" aria-label="Kapat">×</button>
+  </header>
+  <div id="marksList" class="panel-body"></div>
+</aside>
+
+<aside id="panelSet" class="panel" hidden>
+  <header><h2>Görünüm</h2><button class="icon close" aria-label="Kapat">×</button></header>
+  <div class="panel-body">
+    <label class="set-label">Yazı boyutu</label>
+    <div class="row stepper">
+      <button id="fontMinus" class="btn ghost">A−</button>
+      <span id="fontVal"></span>
+      <button id="fontPlus" class="btn ghost">A+</button>
+    </div>
+    <label class="set-label">Satır aralığı</label>
+    <div class="row seg" id="segLine">
+      <button data-v="1.45">Sıkı</button><button data-v="1.65">Normal</button><button data-v="1.9">Geniş</button>
+    </div>
+    <label class="set-label">Tema</label>
+    <div class="row seg" id="segTheme">
+      <button data-v="paper">Kâğıt</button><button data-v="white">Beyaz</button><button data-v="night">Gece</button>
+    </div>
+    <label class="set-label">Sayfa çevirme efekti</label>
+    <div class="row seg" id="segFlip">
+      <button data-v="on">Açık</button><button data-v="off">Kapalı</button>
+    </div>
+  </div>
+</aside>
+
+<div id="toast" hidden></div>
+
+<script src="jszip.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
