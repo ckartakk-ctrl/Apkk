@@ -3,6 +3,7 @@
 Tablet için EPUB ve PDF kitap okuma uygulaması (Android).
 
 - EPUB ya da PDF dosyasını seç, kitaplığa eklensin
+- PDF'ler eklenince otomatik olarak EPUB'a çevrilir (taranmış PDF'ler olduğu gibi açılır)
 - Her sayfa tek ekranda; parmakla sürüklenen, kıvrılan sayfa efekti
 - Kitaptaki resimler ve tam sayfa kapaklar
 - Kelime / cümle işaretleme (4 renk), işaretlere not ekleme, işarete dokununca notu görme

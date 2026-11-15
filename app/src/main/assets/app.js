@@ -17,12 +17,21 @@ let bms = store.get('bms', []);         // yer imleri {id, book, bookTitle, ch, 
 let prefs = Object.assign({ font: 20, line: 1.65, theme: 'paper', flip: 'on', margin: 'dar', tr: 'tr' }, store.get('prefs', {}));
 
 const native = window.Android || null;
+const mockFiles = {};
 const bridge = {
   list() { try { return JSON.parse(native ? native.listBooks() : JSON.stringify(window.__mockBooks || [])); } catch (e) { return []; } },
   pick() { if (native) native.pickBook(); else toast('Dosya seçici yalnızca tablette çalışır'); },
   remove(id) { if (native) native.deleteBook(id); else window.__mockBooks = (window.__mockBooks || []).filter(b => b.id !== id); },
   share(text) { if (native) native.share(text); else console.log(text); },
-  url(id) { return native ? 'https://appassets.androidplatform.net/books/' + encodeURIComponent(id) : 'books/' + id; }
+  url(id) { return native ? 'https://appassets.androidplatform.net/books/' + encodeURIComponent(id) : (mockFiles[id] || 'books/' + id); },
+  /** Üretilen EPUB'u kitaplığa kaydeder, yeni kitabın kimliğini döndürür */
+  async saveEpub(name, zip) {
+    if (native) return native.saveEpub(name, await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' }));
+    const id = Date.now().toString(36) + '_donusturulen.epub';
+    mockFiles[id] = URL.createObjectURL(await zip.generateAsync({ type: 'blob' }));
+    (window.__mockBooks = window.__mockBooks || []).unshift({ id, name });
+    return id;
+  }
 };
 
 /* ---------------- EPUB ---------------- */
@@ -68,7 +77,7 @@ class Epub {
     const txt = n => { const e = els(opf, n)[0]; return e ? e.textContent.trim() : ''; };
     b.title = txt('title');
     b.author = txt('creator');
-    b.lang = txt('language') || 'tr';
+    b.lang = txt('language');
 
     const all = Object.values(items);
     const coverMeta = els(opf, 'meta').find(m => m.getAttribute('name') === 'cover');
@@ -311,6 +320,183 @@ class PdfBook {
   }
 
   dispose() { this.clearPages(); try { this.doc.destroy(); } catch (e) {} }
+}
+
+
+/* ---------------- PDF → EPUB dönüştürme ---------------- */
+
+const xmlEsc = t => t.replace(/[^\x09\x0A\x0D\x20-퟿-�]/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const modeOf = (arr, key, weight) => { const m = new Map(); let best = null, bw = -1; for (const a of arr) { const k = key(a), w = (m.get(k) || 0) + (weight ? weight(a) : 1); m.set(k, w); if (w > bw) { bw = w; best = k; } } return best; };
+
+/**
+ * PDF'in yazısını satır satır okuyup paragraflara ve başlıklara ayırır, yeniden akan bir EPUB üretir.
+ * İçinde yazı olmayan (taranmış) PDF'lerde null döner.
+ */
+async function pdfToEpub(pb, title, author, onProg) {
+  const doc = pb.doc, n = doc.numPages, pages = [];
+  let totalChars = 0;
+  for (let i = 0; i < n; i++) {
+    const page = await doc.getPage(i + 1), vp = page.getViewport({ scale: 1 }), tc = await page.getTextContent();
+    const lines = []; let cur = null;
+    for (const it of tc.items) {
+      if (it.str == null) continue;
+      const size = Math.hypot(it.transform[2], it.transform[3]) || it.height || 10, x = it.transform[4], y = it.transform[5];
+      if (it.str.trim()) {
+        if (cur && Math.abs(y - cur.y) > Math.max(size, cur.size) * 0.5) { lines.push(cur); cur = null; }
+        if (!cur) cur = { text: '', x0: x, x1: x, y, size: 0 };
+        if (cur.text && x - cur.x1 > size * 0.25 && !/\s$/.test(cur.text) && !/^\s/.test(it.str)) cur.text += ' ';
+        cur.text += it.str; cur.x0 = Math.min(cur.x0, x); cur.x1 = Math.max(cur.x1, x + it.width); cur.size = Math.max(cur.size, size);
+      } else if (cur && it.str) cur.text += ' ';
+      if (it.hasEOL && cur) { lines.push(cur); cur = null; }
+    }
+    if (cur) lines.push(cur);
+    for (const l of lines) l.text = l.text.replace(/\s+/g, ' ').trim();
+    const kept = lines.filter(l => l.text);
+    totalChars += kept.reduce((a, l) => a + l.text.length, 0);
+    pages.push({ lines: kept, w: vp.width, h: vp.height });
+    if (onProg) onProg((i + 1) / n * 0.7);
+    if (i % 5 === 4) await new Promise(r => setTimeout(r, 0));
+  }
+  if (totalChars < 60 * n && totalChars < 3000) return null;        // taranmış / resimden oluşan PDF
+
+  // her sayfada tekrar eden üst-alt bilgi satırları ve sayfa numaraları atılır
+  const edge = new Map(), norm = t => t.replace(/\d+/g, '#');
+  const atEdge = (p, l) => l.y > p.h * 0.9 || l.y < p.h * 0.1;
+  for (const p of pages) for (const l of p.lines) if (atEdge(p, l)) edge.set(norm(l.text), (edge.get(norm(l.text)) || 0) + 1);
+  const repeated = t => n >= 5 && edge.get(norm(t)) >= Math.max(3, n * 0.3);
+  const pageNo = t => /^[\W_]*(\d{1,4}|[ivxlc]{1,7})[\W_]*$/i.test(t);
+  for (const p of pages) p.lines = p.lines.filter(l => !(atEdge(p, l) && (pageNo(l.text) || repeated(l.text))));
+
+  const all = pages.flatMap(p => p.lines);
+  const body = modeOf(all, l => Math.round(l.size * 2) / 2, l => l.text.length) || 10;
+  const blocks = [];          // {type:'p'|'h'|'img', text, page}
+  const ENDS = /[.!?:…"”»)\]]$/;
+  let imgCount = 0, indented = 0;
+  const cutPages = new Set(pb.toc.filter(t => t.depth === 0).map(t => t.ch));   // içindekilerdeki bölüm başları
+  for (let pi = 0; pi < n; pi++) {
+    const L = pages[pi].lines;
+    const chars = L.reduce((a, l) => a + l.text.length, 0);
+    // neredeyse hiç yazısı olmayan sayfalar (kapak, tam sayfa resim) resim olarak eklenir
+    if (chars < 80 && imgCount < 80) {
+      try {
+        const page = await doc.getPage(pi + 1), v1 = page.getViewport({ scale: 1 });
+        const vp = page.getViewport({ scale: Math.min(1400 / v1.width, 2.5) });
+        const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+        const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+        await page.render({ canvasContext: g, viewport: vp }).promise;
+        const blank = (() => { const d = g.getImageData(0, 0, c.width, c.height).data; for (let k = 0; k < d.length; k += 4 * 97) if (d[k] < 235 || d[k + 1] < 235 || d[k + 2] < 235) return false; return true; })();
+        if (!blank) { blocks.push({ type: 'img', page: pi, data: c.toDataURL('image/jpeg', 0.85).split(',')[1] }); imgCount++; }
+        c.width = c.height = 0;
+        if (!blank) continue;
+      } catch (e) {}
+    }
+    if (!L.length) continue;
+    const bodyL = L.filter(l => Math.abs(l.size - body) < 0.6), ref = bodyL.length >= 3 ? bodyL : L;
+    const left = modeOf(ref, l => Math.round(l.x0));
+    const right = ref.map(l => l.x1).sort((a, b) => a - b)[Math.floor(ref.length * 0.95)] || pages[pi].w;
+    const gaps = []; for (let k = 1; k < L.length; k++) { const dy = L[k - 1].y - L[k].y; if (dy > 0) gaps.push(dy); }
+    gaps.sort((a, b) => a - b);
+    const med = gaps.length ? gaps[gaps.length >> 1] : body * 1.2;
+    let prev = null;
+    for (const l of L) {
+      const head = l.size > body * 1.18 && l.text.length < 140;
+      const last = blocks[blocks.length - 1];
+      let fresh;
+      if (!prev) {
+        // paragraf önceki sayfadan devam ediyor mu?
+        const cont = last && last.type === 'p' && !head && last.page === pi - 1 && !cutPages.has(pi);
+        if (!cont) fresh = true;
+        else if (!ENDS.test(last.text) || /[-,;]$/.test(last.text)) fresh = false;
+        else fresh = indented >= 5 ? l.x0 - left > l.size * 0.8 : !/^[a-zçğıöşü]/.test(l.text);
+      } else {
+        const dy = prev.y - l.y, pHead = last && last.type === 'h';
+        fresh = head !== pHead || dy < 0 || dy > med * 1.45 ||
+          (!head && l.x0 - left > l.size * 0.8 && prev.x0 - left < l.size * 0.5 && ++indented > 0) ||
+          (!head && prev.x1 < right - (right - left) * 0.12 && ENDS.test(prev.text));
+      }
+      if (fresh || !last || last.type === 'img') blocks.push({ type: head ? 'h' : 'p', text: l.text, page: pi });
+      else if (/[-­]$/.test(last.text) && /^[a-zçğıöşü]/.test(l.text)) last.text = last.text.slice(0, -1) + l.text;
+      else last.text += ' ' + l.text;
+      prev = l;
+    }
+    if (onProg) onProg(0.7 + (pi + 1) / n * 0.25);
+  }
+
+  // bölümler: PDF'in içindekiler listesi varsa ona göre, yoksa 15'er sayfalık parçalar
+  const parts = [];          // {label, named, blocks}
+  const tops = pb.toc.filter(t => t.depth === 0), heads = blocks.filter(b => b.type === 'h');
+  if (tops.length >= 2) {
+    const cuts = [];
+    for (const t of tops) if (!cuts.length || t.ch > cuts[cuts.length - 1].page) cuts.push({ page: t.ch, label: t.label });
+    if (cuts[0].page > 0) cuts.unshift({ page: 0, label: 'Başlangıç', plain: true });
+    cuts.forEach((c, k) => parts.push({ label: c.label, named: !c.plain, blocks: blocks.filter(b => b.page >= c.page && b.page < (k + 1 < cuts.length ? cuts[k + 1].page : n)) }));
+  } else if (heads.length >= 2 && heads.length <= 200) {
+    let cur = { label: 'Başlangıç', blocks: [] };
+    for (const b of blocks) {
+      if (b.type === 'h' && cur.blocks.some(x => x.type === 'p')) { parts.push(cur); cur = { label: b.text, blocks: [] }; }
+      else if (b.type === 'h' && !cur.blocks.some(x => x.type === 'h')) cur.label = b.text;
+      cur.blocks.push(b);
+    }
+    parts.push(cur);
+  } else for (let p = 0; p < n; p += 15) parts.push({ label: 'Sayfa ' + (p + 1) + '–' + Math.min(n, p + 15), blocks: blocks.filter(b => b.page >= p && b.page < p + 15) });
+
+  const zip = new JSZip();
+  zip.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
+  zip.file('META-INF/container.xml', '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');
+  let manifest = '', spine = '', nav = '', imgNo = 0, chNo = 0, coverId = '';
+  for (const pt of parts) {
+    const part = pt.blocks, label = pt.label.slice(0, 90);
+    if (!part.length) continue;
+    let html = '';
+    if (pt.named && !(part[0].type === 'h' && part[0].text.toLowerCase() === pt.label.toLowerCase())) html += '<h1>' + xmlEsc(label) + '</h1>\n';
+    for (const b of part) {
+      if (b.type === 'img') {
+        const name = 'img/s' + (++imgNo) + '.jpg';
+        zip.file('OEBPS/' + name, b.data, { base64: true });
+        manifest += '<item id="im' + imgNo + '" href="' + name + '" media-type="image/jpeg"' + (b.page === 0 ? ' properties="cover-image"' : '') + '/>';
+        if (b.page === 0) coverId = 'im' + imgNo;
+        html += '<p><img src="' + name + '" alt=""/></p>\n';
+      } else html += (b.type === 'h' ? '<h2>' : '<p>') + xmlEsc(b.text) + (b.type === 'h' ? '</h2>' : '</p>') + '\n';
+    }
+    chNo++;
+    zip.file('OEBPS/b' + chNo + '.xhtml', '<?xml version="1.0" encoding="utf-8"?>\n<html xmlns="http://www.w3.org/1999/xhtml"><head><title>' + xmlEsc(label) + '</title></head><body>\n' + html + '</body></html>');
+    manifest += '<item id="b' + chNo + '" href="b' + chNo + '.xhtml" media-type="application/xhtml+xml"/>';
+    spine += '<itemref idref="b' + chNo + '"/>';
+    nav += '<navPoint id="n' + chNo + '" playOrder="' + chNo + '"><navLabel><text>' + xmlEsc(label) + '</text></navLabel><content src="b' + chNo + '.xhtml"/></navPoint>';
+  }
+  if (!chNo) return null;
+  const sample = blocks.filter(b => b.text).slice(0, 400).map(b => b.text).join(' ');
+  const lang = (sample.match(/[ığşİĞŞ]/g) || []).length > sample.length * 0.004 ? 'tr' : 'und';
+  zip.file('OEBPS/toc.ncx', '<?xml version="1.0" encoding="utf-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head/><docTitle><text>' + xmlEsc(title) + '</text></docTitle><navMap>' + nav + '</navMap></ncx>');
+  zip.file('OEBPS/content.opf', '<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">kitapmelegi-' + Date.now() + '</dc:identifier><dc:title>' + xmlEsc(title) + '</dc:title>' + (author ? '<dc:creator>' + xmlEsc(author) + '</dc:creator>' : '') + '<dc:language>' + lang + '</dc:language>' + (coverId ? '<meta name="cover" content="' + coverId + '"/>' : '') + '</metadata><manifest>' + manifest + '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine toc="ncx">' + spine + '</spine></package>');
+  if (onProg) onProg(1);
+  return zip;
+}
+
+/** Kitaplıktaki bir PDF'i EPUB'a çevirip yerine koyar. Çevrilemezse (taranmış PDF) null döner. */
+async function convertPdf(id) {
+  const m = meta[id] || (meta[id] = {});
+  if (m.noConv) return null;
+  const say = t => { $('#loading span').textContent = t; };
+  let pb = null;
+  try {
+    say('PDF okunuyor…');
+    pb = await PdfBook.open(bridge.url(id));
+    const name = (bridge.list().find(b => b.id === id) || { name: id }).name.replace(/\.pdf$/i, '');
+    const title = pb.title || name;
+    const zip = await pdfToEpub(pb, title, pb.author, f => say('PDF kitaba dönüştürülüyor… %' + Math.round(f * 100)));
+    if (!zip) { m.noConv = true; store.set('books', meta); toast('Bu PDF taranmış sayfalardan oluşuyor; olduğu gibi açılıyor'); return null; }
+    const newId = await bridge.saveEpub(name + '.epub', zip);
+    if (!newId) throw new Error('kaydedilemedi');
+    bridge.remove(id); delete meta[id]; store.set('books', meta);
+    return newId;
+  } catch (e) {
+    console.error(e);
+    return null;
+  } finally {
+    if (pb) pb.dispose();
+    say('Kitap açılıyor…');
+  }
 }
 
 /* ---------------- Sayfa katmanı ---------------- */
@@ -759,7 +945,7 @@ function expandToSentence() {
 async function translateText(text) {
   let to = prefs.tr, from = 'autodetect';
   const lang = ((R.book && R.book.lang) || '').slice(0, 2).toLowerCase();
-  if (/^[a-z]{2}$/.test(lang)) { from = lang; if (lang === to) to = to === 'tr' ? 'en' : 'tr'; }
+  if (/^[a-z]{2}$/.test(lang) && lang !== 'un') { from = lang; if (lang === to) to = to === 'tr' ? 'en' : 'tr'; }
   // servis tek seferde ~500 karakter alıyor: cümle cümle böl
   const parts = []; let buf = '';
   for (const piece of text.match(/[^.!?…]+[.!?…]*\s*/g) || [text]) {
@@ -977,6 +1163,12 @@ async function openBook(id, jump) {
   $('#library').hidden = true; $('#reader').hidden = false; $('#loading').hidden = false;
   showBars(false);
   try {
+    if (/\.pdf$/i.test(id)) {
+      // PDF'ler önce yazı boyutu ayarlanabilen bir EPUB'a çevrilir
+      if (R.id === id && R.book) { R.book.dispose(); R.book = null; R.id = null; }
+      const conv = await convertPdf(id);
+      if (conv) { id = conv; jump = null; }
+    }
     if (R.id !== id || !R.book) {
       if (R.book) R.book.dispose();
       R.book = null; P.sig = ''; P.done = false; P.job++;

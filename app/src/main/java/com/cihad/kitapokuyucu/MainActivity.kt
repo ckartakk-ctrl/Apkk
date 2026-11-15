@@ -199,6 +199,21 @@ class MainActivity : Activity() {
             File(booksDir, f.name + ".name").delete()
         }
 
+        /** PDF'ten üretilen EPUB'u kitaplığa yazar; yeni dosyanın kimliğini döndürür. */
+        @JavascriptInterface
+        fun saveEpub(name: String, base64: String): String {
+            return try {
+                val safe = name.replace(Regex("\\.epub$", RegexOption.IGNORE_CASE), "")
+                    .replace(Regex("[^A-Za-z0-9._-]"), "_").takeLast(50)
+                val id = System.currentTimeMillis().toString(36) + "_" + safe + ".epub"
+                File(booksDir, id).writeBytes(android.util.Base64.decode(base64, android.util.Base64.DEFAULT))
+                File(booksDir, "$id.name").writeText(name)
+                id
+            } catch (e: Exception) {
+                ""
+            }
+        }
+
         @JavascriptInterface
         fun share(text: String) = runOnUiThread {
             val i = Intent(Intent.ACTION_SEND).apply {
