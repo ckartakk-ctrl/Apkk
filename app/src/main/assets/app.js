@@ -13,7 +13,8 @@ const store = {
 
 let meta = store.get('books', {});      // id -> {title, author, cover, pos, pct}
 let marks = store.get('marks', []);     // {id, book, bookTitle, ch, chTitle, start, end, text, color, ts}
-let prefs = Object.assign({ font: 20, line: 1.65, theme: 'paper', flip: 'on' }, store.get('prefs', {}));
+let bms = store.get('bms', []);         // yer imleri {id, book, bookTitle, ch, chTitle, off, text, ts}
+let prefs = Object.assign({ font: 20, line: 1.65, theme: 'paper', flip: 'on', margin: 'dar', tr: 'tr' }, store.get('prefs', {}));
 
 const native = window.Android || null;
 const bridge = {
@@ -165,6 +166,7 @@ class Epub {
           }
         }
       }
+      if (body.textContent.trim().length < 40) body.querySelectorAll('img').forEach(im => im.setAttribute('class', 'full'));
       for (const n of Array.from(body.childNodes)) frag.appendChild(document.importNode(n, true));
     }
     this.cache.set(i, frag);
@@ -215,10 +217,13 @@ class Sheet {
     this.ch = ch;
     paintMarks(this);
     await imagesReady(this.flow);
+    // küçük resimler (süs, baş harf) satır içinde kalsın
+    this.flow.querySelectorAll('img:not(.full)').forEach(im => { if (im.naturalWidth && im.naturalWidth < 70 && im.naturalHeight < 70) im.classList.add('inl'); });
     this.layout();
   }
   layout() {
     this.flow.style.columnWidth = this.clip.clientWidth + 'px';
+    this.flow.style.setProperty('--page-h', (this.clip.clientHeight - 2) + 'px');
     this.pages = Math.max(1, Math.round((this.flow.scrollWidth + GAP) / this.step));
     if (this.page > this.pages - 1) this.page = this.pages - 1;
     this.show(this.page);
@@ -226,19 +231,44 @@ class Sheet {
   show(p) {
     this.page = clamp(p, 0, this.pages - 1);
     this.flow.style.transform = 'translateX(' + (-this.page * this.step) + 'px)';
-    if (R.book) {
-      this.footCh.textContent = R.book.chapterTitle(this.ch);
-      this.footPg.textContent = (this.page + 1) + ' / ' + this.pages;
-    }
+    this.foot();
+  }
+  foot() {
+    if (!R.book || this.ch < 0) return;
+    this.footCh.textContent = R.book.chapterTitle(this.ch);
+    this.footPg.textContent = P.done ? (P.starts[this.ch] + this.page + 1) + ' / ' + P.total : (this.page + 1) + ' / ' + this.pages;
   }
   pageOfRect(rect) {
     const x = rect.left - this.flow.getBoundingClientRect().left;
     return clamp(Math.floor((x + 2) / this.step), 0, this.pages - 1);
   }
-  pageOfOffset(off) {
-    const r = rangeFromOffsets(this.flow, off, off + 1);
-    const rect = r && r.getClientRects()[0];
-    return rect ? this.pageOfRect(rect) : 0;
+  /** off konumundaki (ya da hemen sonrasındaki) görünür karakterin kutusu */
+  rectAt(off) {
+    const nodes = textNodes(this.flow), r = document.createRange();
+    let pos = 0, tries = 0;
+    for (const n of nodes) {
+      const e = pos + n.data.length;
+      if (off < e) {
+        let i = Math.max(0, off - pos);
+        while (i < n.data.length && /\s/.test(n.data[i])) i++;
+        if (i < n.data.length) {
+          r.setStart(n, i); r.setEnd(n, i + 1);
+          const rect = r.getClientRects()[0];
+          if (rect) return rect;
+        }
+        if (++tries > 8) break;
+      }
+      pos = e;
+    }
+    return null;
+  }
+  pageOfOffset(off) { const rect = this.rectAt(off); return rect ? this.pageOfRect(rect) : this.pages - 1; }
+  /** bu sayfadaki ilk karakterin bölüm içindeki sırası */
+  firstOffset() {
+    if (this.page === 0) return 0;
+    let lo = 0, hi = this.flow.textContent.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (this.pageOfOffset(mid) < this.page) lo = mid + 1; else hi = mid; }
+    return lo;
   }
   pageOfAnchor(id) {
     let el = null;
@@ -247,7 +277,8 @@ class Sheet {
   }
 }
 
-const sheetA = new Sheet($('#sheetA')), sheetB = new Sheet($('#sheetB'));
+const P = { sig: '', counts: [], starts: [], total: 0, done: false, job: 0 };   // kitap geneli sayfa numaraları
+const sheetA = new Sheet($('#sheetA')), sheetB = new Sheet($('#sheetB')), sheetM = new Sheet($('#sheetM'));
 const R = { id: null, book: null, cur: sheetA, other: sheetB, busy: false };
 
 function setTop(s) {
@@ -256,39 +287,170 @@ function setTop(s) {
   o.el.className = 'sheet under rest';
 }
 
-function animate(cur, oth, dir) {
-  if (prefs.flip === 'off') { setTop(oth); return Promise.resolve(); }
-  return new Promise(res => {
-    const mover = dir > 0 ? cur : oth, still = dir > 0 ? oth : cur;
-    still.el.className = 'sheet under';
-    mover.el.className = 'sheet top turning ' + (dir > 0 ? 'out-fwd' : 'in-back');
-    let done = false;
-    const fin = () => {
-      if (done) return; done = true;
-      mover.el.removeEventListener('animationend', onEnd);
-      setTop(oth); res();
-    };
-    const onEnd = e => { if (e.target === mover.el) fin(); };
-    mover.el.addEventListener('animationend', onEnd);
-    setTimeout(fin, 1000);
-  });
+/* ---------------- Sayfa numaraları ---------------- */
+
+const layoutSig = () => [R.id, innerWidth, innerHeight, prefs.font, prefs.line, prefs.margin].join('|');
+function setCounts(counts) {
+  P.counts = counts; P.starts = []; let t = 0;
+  for (const c of counts) { P.starts.push(t); t += c; }
+  P.total = t; P.done = true;
+}
+async function countPages() {
+  if (!R.book) return;
+  const sig = layoutSig();
+  if (P.sig === sig) return;
+  P.sig = sig; P.done = false; const job = ++P.job, book = R.book, n = book.spine.length;
+  const m = meta[R.id] || {};
+  if (m.pc && m.pc.sig === sig && m.pc.counts.length === n) { setCounts(m.pc.counts); return refreshPages(); }
+  refreshPages();
+  const counts = [];
+  sheetM.ch = -1; sheetM.page = 0;
+  for (let i = 0; i < n; i++) {
+    await new Promise(r => setTimeout(r, 25));
+    if (job !== P.job || R.book !== book) return;
+    await sheetM.load(i);
+    if (job !== P.job || R.book !== book) return;
+    counts.push(sheetM.pages);
+    $('#gotoInfo').textContent = 'Sayfalar sayılıyor… %' + Math.round((i + 1) / n * 100);
+  }
+  sheetM.flow.replaceChildren(); sheetM.ch = -1;
+  setCounts(counts);
+  if (meta[R.id]) { meta[R.id].pc = { sig, counts }; store.set('books', meta); }
+  refreshPages();
+}
+function refreshPages() {
+  sheetA.foot(); sheetB.foot();
+  const s = R.cur, sl = $('#slider');
+  sl.disabled = !P.done;
+  if (P.done && s.ch >= 0) {
+    const pg = P.starts[s.ch] + s.page + 1;
+    sl.max = P.total; sl.value = pg;
+    $('#progText').textContent = 'Sayfa ' + pg + ' / ' + P.total;
+    $('#gotoInfo').textContent = 'Şu an ' + pg + '. sayfadasın. Kitap ' + P.total + ' sayfa.';
+    $('#gotoInput').max = P.total;
+  } else if (R.book && s.ch >= 0) {
+    $('#progText').textContent = R.book.chapterTitle(s.ch);
+  }
+}
+function goToPage(n) {
+  if (!P.done) return toast('Sayfalar hâlâ sayılıyor, birkaç saniye sonra dene');
+  n = clamp(Math.round(n) || 1, 1, P.total);
+  let ch = 0;
+  while (ch < P.counts.length - 1 && P.starts[ch + 1] <= n - 1) ch++;
+  return goTo({ ch, page: n - 1 - P.starts[ch] });
 }
 
-async function turn(dir) {
-  if (R.busy || !R.book) return;
+/* ---------------- Kıvrılan sayfa efekti ---------------- */
+
+const curl = $('#curl'), cx = curl.getContext('2d');
+let paper = '#f8f1e3';
+function sizeCurl() {
+  const d = Math.min(window.devicePixelRatio || 1, 2);
+  curl.width = Math.round(innerWidth * d); curl.height = Math.round(innerHeight * d);
+  cx.setTransform(d, 0, 0, d, 0, 0);
+}
+function cutPoly(poly, M, n, sign) {      // yarım düzlemle kes: sign*((p-M)·n) <= 0 olan taraf kalır
+  const out = [], f = p => ((p[0] - M[0]) * n[0] + (p[1] - M[1]) * n[1]) * sign;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length], fa = f(a), fb = f(b);
+    if (fa <= 0) out.push(a);
+    if ((fa < 0 && fb > 0) || (fa > 0 && fb < 0)) { const t = fa / (fa - fb); out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]); }
+  }
+  return out;
+}
+/** Sayfanın köşesi (W,cy) T noktasına çekilmiş gibi katlar: üstteki sayfayı kırpar, kıvrımı ve gölgeleri çizer. */
+function drawCurl(topEl, T, cy) {
+  const W = innerWidth, H = innerHeight, C = [W, cy];
+  // kâğıt sırttan kopmasın: köşe, sırtın iki ucuna sayfa boyundan uzak olamaz
+  let dx = T[0], dy = T[1] - cy, d = Math.hypot(dx, dy);
+  if (d > W) T = [dx * W / d, cy + dy * W / d];
+  const diag = Math.hypot(W, H), oy = H - cy;
+  dx = T[0]; dy = T[1] - oy; d = Math.hypot(dx, dy);
+  if (d > diag) T = [dx * diag / d, oy + dy * diag / d];
+
+  cx.clearRect(0, 0, W, H);
+  const vx = C[0] - T[0], vy = C[1] - T[1], L = Math.hypot(vx, vy);
+  if (L < 1) { topEl.style.clipPath = ''; return; }
+  const n = [vx / L, vy / L], M = [(C[0] + T[0]) / 2, (C[1] + T[1]) / 2];
+  const page = [[0, 0], [W, 0], [W, H], [0, H]];
+  const kept = cutPoly(page, M, n, 1), gone = cutPoly(page, M, n, -1);
+  topEl.style.clipPath = kept.length > 2 ? 'polygon(' + kept.map(p => p[0].toFixed(1) + 'px ' + p[1].toFixed(1) + 'px').join(',') + ')' : 'polygon(0 0,0 0,0 0)';
+  if (gone.length < 3) return;
+  const flap = gone.map(p => { const k = (p[0] - M[0]) * n[0] + (p[1] - M[1]) * n[1]; return [p[0] - 2 * k * n[0], p[1] - 2 * k * n[1]]; });
+  const path = poly => { cx.beginPath(); poly.forEach((p, i) => i ? cx.lineTo(p[0], p[1]) : cx.moveTo(p[0], p[1])); cx.closePath(); };
+  const grad = (len, dir, stops) => {
+    const g = cx.createLinearGradient(M[0], M[1], M[0] + n[0] * len * dir, M[1] + n[1] * len * dir);
+    stops.forEach(s => g.addColorStop(s[0], s[1])); return g;
+  };
+  const depth = L / 2;
+  // alttaki sayfaya düşen gölge
+  cx.save(); path(gone); cx.clip();
+  cx.fillStyle = grad(Math.max(40, depth * 0.55), 1, [[0, 'rgba(0,0,0,.42)'], [0.35, 'rgba(0,0,0,.16)'], [1, 'rgba(0,0,0,0)']]);
+  cx.fillRect(0, 0, W, H); cx.restore();
+  // kıvrılan kâğıdın arkası + okunan sayfaya düşen gölgesi
+  cx.save();
+  cx.shadowColor = 'rgba(0,0,0,.5)'; cx.shadowBlur = clamp(depth * 0.3, 14, 70);
+  cx.shadowOffsetX = -n[0] * 8; cx.shadowOffsetY = -n[1] * 8;
+  path(flap); cx.fillStyle = paper; cx.fill(); cx.restore();
+  // kâğıdın bombesi: kat yerinde koyu, hemen yanında parlak, uçta yine hafif koyu
+  cx.save(); path(flap); cx.clip();
+  cx.fillStyle = grad(Math.max(24, depth), -1, [[0, 'rgba(0,0,0,.30)'], [0.07, 'rgba(0,0,0,.10)'], [0.2, 'rgba(255,255,255,.30)'], [0.55, 'rgba(255,255,255,.05)'], [1, 'rgba(0,0,0,.16)']]);
+  cx.fillRect(0, 0, W, H); cx.restore();
+  // kat çizgisi
+  cx.save(); path(flap); cx.clip();
+  cx.strokeStyle = 'rgba(0,0,0,.18)'; cx.lineWidth = 1;
+  cx.beginPath(); cx.moveTo(M[0] - n[1] * diag, M[1] + n[0] * diag); cx.lineTo(M[0] + n[1] * diag, M[1] - n[0] * diag); cx.stroke();
+  cx.restore();
+}
+function clearCurl() {
+  cx.clearRect(0, 0, innerWidth, innerHeight);
+  sheetA.el.style.clipPath = ''; sheetB.el.style.clipPath = '';
+}
+
+/** Çevirmeyi hazırlar: hedef sayfayı alttaki/üstteki katmana yükler. */
+async function beginTurn(dir) {
+  if (R.busy || !R.book) return null;
   const cur = R.cur, oth = R.other;
   let ch = cur.ch, pg = cur.page + dir, toLast = false;
-  if (pg < 0) { if (ch === 0) return toast('Kitabın başındasın'); ch--; toLast = true; }
-  else if (pg >= cur.pages) { if (ch >= R.book.spine.length - 1) return toast('Kitabın sonu'); ch++; pg = 0; }
+  if (pg < 0) { if (ch === 0) { toast('Kitabın başındasın'); return null; } ch--; toLast = true; }
+  else if (pg >= cur.pages) { if (ch >= R.book.spine.length - 1) { toast('Kitabın sonu'); return null; } ch++; pg = 0; }
   R.busy = true;
   hideFloating();
   try {
     await oth.load(ch);
     oth.show(toLast ? oth.pages - 1 : pg);
-    await animate(cur, oth, dir);
-    R.cur = oth; R.other = cur;
-    afterMove();
-  } finally { R.busy = false; }
+  } catch (e) { R.busy = false; return null; }
+  const top = dir > 0 ? cur : oth, under = dir > 0 ? oth : cur;
+  if (dir < 0 && prefs.flip !== 'off') drawCurl(top.el, [-innerWidth, innerHeight], innerHeight);
+  under.el.className = 'sheet under'; top.el.className = 'sheet top';
+  return { dir, cur, oth, top };
+}
+function endTurn(f, commit) {
+  clearCurl();
+  if (commit) { setTop(f.oth); R.cur = f.oth; R.other = f.cur; }
+  else setTop(f.cur);
+  R.busy = false;
+  if (commit) afterMove();
+}
+function animateCurl(f, cy, from, to, ms, arc) {
+  return new Promise(res => {
+    const t0 = performance.now();
+    const step = now => {
+      const t = Math.min(1, (now - t0) / ms), e = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      drawCurl(f.top.el, [from[0] + (to[0] - from[0]) * e, from[1] + (to[1] - from[1]) * e + (cy ? -1 : 1) * Math.sin(Math.PI * e) * arc], cy);
+      if (t < 1) requestAnimationFrame(step); else res();
+    };
+    requestAnimationFrame(step);
+  });
+}
+async function turn(dir) {
+  const f = await beginTurn(dir);
+  if (!f) return;
+  if (prefs.flip !== 'off') {
+    const W = innerWidth, H = innerHeight;
+    await animateCurl(f, H, dir > 0 ? [W, H] : [-W, H], dir > 0 ? [-W, H] : [W, H], 620, H * 0.2);
+  }
+  endTurn(f, true);
 }
 
 async function goTo(pos) {
@@ -298,28 +460,31 @@ async function goTo(pos) {
     const s = R.cur;
     await s.load(clamp(pos.ch || 0, 0, R.book.spine.length - 1));
     let p = 0;
-    if (pos.off != null) p = s.pageOfOffset(pos.off);
+    if (pos.page != null) p = pos.page;
+    else if (pos.off != null) p = s.pageOfOffset(pos.off);
     else if (pos.anchor) p = s.pageOfAnchor(pos.anchor);
     else if (pos.frac) p = Math.min(s.pages - 1, Math.floor(pos.frac * s.pages + 1e-4));
-    s.show(p); setTop(s);
-    afterMove();
+    s.show(p); setTop(s); clearCurl();
   } finally { R.busy = false; }
+  afterMove();
 }
 
 function afterMove() {
   const s = R.cur, n = R.book.spine.length;
-  const pct = clamp((s.ch + (s.page + 1) / s.pages) / n, 0, 1);
+  const pct = P.done ? (P.starts[s.ch] + s.page + 1) / P.total : clamp((s.ch + (s.page + 1) / s.pages) / n, 0, 1);
   const m = meta[R.id] || (meta[R.id] = {});
-  m.pos = { ch: s.ch, frac: s.page / s.pages }; m.pct = pct;
+  m.pos = { ch: s.ch, off: s.firstOffset(), frac: s.page / s.pages }; m.pct = pct;
   store.set('books', meta);
-  $('#progFill').style.width = (pct * 100).toFixed(1) + '%';
-  $('#progText').textContent = '%' + Math.round(pct * 100) + ' · ' + R.book.chapterTitle(s.ch);
+  refreshPages();
+  const here = pageBookmark();
+  $('#ribbon').hidden = !here;
+  $('#btnBm').textContent = here ? 'Yer imini kaldır' : 'Yer imi';
   // bir sonraki sayfayı arkada hazırla
-  const next = s.page < s.pages - 1 ? s.ch : Math.min(s.ch + 1, n - 1);
-  R.other.load(next);
+  R.other.load(s.page < s.pages - 1 ? s.ch : Math.min(s.ch + 1, n - 1));
+  countPages();
 }
 
-/* ---------------- İşaretler ---------------- */
+/* ---------------- İşaretler ve notlar ---------------- */
 
 function textNodes(root) {
   const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), a = [];
@@ -354,14 +519,12 @@ function paintMarks(sheet) {
       if (a > 0) node = node.splitText(a);
       if (!node.data.trim()) continue;
       const mk = document.createElement('mark');
-      mk.className = 'hl ' + m.color; mk.dataset.id = m.id;
+      mk.className = 'hl ' + m.color + (m.note ? ' noted' : ''); mk.dataset.id = m.id;
       node.replaceWith(mk); mk.appendChild(node);
     }
   }
 }
-function repaint() {
-  [sheetA, sheetB].forEach(s => { if (s.ch >= 0) paintMarks(s); });
-}
+function repaint() { [sheetA, sheetB].forEach(s => { if (s.ch >= 0) paintMarks(s); }); }
 
 let lastSel = null;
 function selRange() {
@@ -382,7 +545,7 @@ document.addEventListener('selectionchange', () => {
   if (r) {
     const o = selOffsets(r);
     lastSel = { ch: R.cur.ch, start: o.start, end: o.end, t: Date.now() };
-    $('#markPop').hidden = true; showBars(false);
+    showBars(false);
     $('#selbar').hidden = false;
   } else if (lastSel) {
     lastSel.t = Date.now();
@@ -391,37 +554,46 @@ document.addEventListener('selectionchange', () => {
 });
 function activeSel() {
   const r = selRange();
-  if (r) { const o = selOffsets(r); return { ch: R.cur.ch, start: o.start, end: o.end }; }
-  if (lastSel && Date.now() - lastSel.t < 2500 && lastSel.ch === R.cur.ch) return lastSel;
-  return null;
-}
-
-function addMark(color) {
-  const s = activeSel();
-  if (!s) return;
+  let s = null;
+  if (r) { const o = selOffsets(r); s = { ch: R.cur.ch, start: o.start, end: o.end }; }
+  else if (lastSel && Date.now() - lastSel.t < 2500 && lastSel.ch === R.cur.ch) s = { ch: lastSel.ch, start: lastSel.start, end: lastSel.end };
+  if (!s) return null;
   const T = R.cur.flow.textContent;
-  let a = s.start, b = s.end;
-  while (a < b && /\s/.test(T[a])) a++;
-  while (b > a && /\s/.test(T[b - 1])) b--;
-  if (b <= a) return;
-  // üst üste gelen eski işaretleri birleştir
+  while (s.start < s.end && /\s/.test(T[s.start])) s.start++;
+  while (s.end > s.start && /\s/.test(T[s.end - 1])) s.end--;
+  if (s.end <= s.start) return null;
+  s.text = T.slice(s.start, s.end).replace(/\s+/g, ' ').trim();
+  return s;
+}
+function clearSel() { getSelection().removeAllRanges(); lastSel = null; $('#selbar').hidden = true; }
+
+function createMark(s, color, note) {
+  let a = s.start, b = s.end; const notes = [];
+  // üst üste gelen eski işaretleri birleştir (notları korunur)
   marks = marks.filter(m => {
     if (m.book !== R.id || m.ch !== s.ch || m.end <= a || m.start >= b) return true;
-    a = Math.min(a, m.start); b = Math.max(b, m.end); return false;
+    a = Math.min(a, m.start); b = Math.max(b, m.end); if (m.note) notes.push(m.note); return false;
   });
-  marks.push({
+  if (note) notes.push(note);
+  const T = R.cur.ch === s.ch ? R.cur.flow.textContent : null;
+  const mk = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
     book: R.id, bookTitle: (meta[R.id] && meta[R.id].title) || R.book.title || 'Kitap',
     ch: s.ch, chTitle: R.book.chapterTitle(s.ch),
-    start: a, end: b, text: T.slice(a, b).replace(/\s+/g, ' ').trim(), color, ts: Date.now()
-  });
+    start: a, end: b, text: T ? T.slice(a, b).replace(/\s+/g, ' ').trim() : s.text, color, note: notes.join('\n'), ts: Date.now()
+  };
+  marks.push(mk);
   store.set('marks', marks);
-  getSelection().removeAllRanges(); lastSel = null;
-  $('#selbar').hidden = true;
-  repaint();
-  toast('İşaretlendi');
+  clearSel(); repaint();
+  return mk;
 }
-
+function addMark(color) {
+  const s = activeSel();
+  if (!s) return null;
+  const mk = createMark(s, color);
+  toast('İşaretlendi');
+  return mk;
+}
 function removeMark(id) {
   marks = marks.filter(m => m.id !== id);
   store.set('marks', marks);
@@ -458,40 +630,173 @@ function expandToSentence() {
   $('#selbar').hidden = false;
 }
 
+/* ---------------- Çeviri ---------------- */
+
+async function translateText(text) {
+  let to = prefs.tr, from = 'autodetect';
+  const lang = ((R.book && R.book.lang) || '').slice(0, 2).toLowerCase();
+  if (/^[a-z]{2}$/.test(lang)) { from = lang; if (lang === to) to = to === 'tr' ? 'en' : 'tr'; }
+  // servis tek seferde ~500 karakter alıyor: cümle cümle böl
+  const parts = []; let buf = '';
+  for (const piece of text.match(/[^.!?…]+[.!?…]*\s*/g) || [text]) {
+    if ((buf + piece).length > 440 && buf) { parts.push(buf); buf = ''; }
+    buf += piece;
+    while (buf.length > 440) { parts.push(buf.slice(0, 440)); buf = buf.slice(440); }
+  }
+  if (buf.trim()) parts.push(buf);
+  const out = [], dec = document.createElement('textarea');
+  for (const q of parts) {
+    const res = await fetch('https://api.mymemory.translated.net/get?q=' + encodeURIComponent(q.trim()) + '&langpair=' + from + '|' + to);
+    const j = await res.json();
+    const t = j && j.responseData && j.responseData.translatedText;
+    if (!t || /MYMEMORY WARNING|QUERY LENGTH LIMIT/i.test(t)) throw new Error(/MYMEMORY WARNING/i.test(t || '') ? 'Bugünlük ücretsiz çeviri hakkı doldu, yarın tekrar dene' : 'Çeviri alınamadı');
+    if (String(j.responseStatus) !== '200') throw new Error('Çeviri alınamadı');
+    dec.innerHTML = t; out.push(dec.value);
+  }
+  return out.join(' ');
+}
+
+/* ---------------- İşaret kartı (not + çeviri) ---------------- */
+
+let pop = null;   // {id} işaretli yer  |  {sel} henüz işaretlenmemiş seçim
+function renderPop() {
+  const m = pop.id ? marks.find(x => x.id === pop.id) : null;
+  if (pop.id && !m) return closePop();
+  $('#popText').textContent = m ? m.text : pop.sel.text;
+  const nb = $('#popNote'); nb.hidden = !(m && m.note); nb.textContent = m ? m.note || '' : '';
+  const tb = $('#popTr'); tb.hidden = pop.tr == null; tb.textContent = pop.tr || '';
+  $('#btnPopNote').hidden = !m; $('#btnPopNote').textContent = m && m.note ? 'Notu düzenle' : 'Not ekle';
+  $('#btnPopDel').hidden = !m;
+  $('#btnPopTr').hidden = pop.tr != null;
+  $('#btnPopTrSave').hidden = !pop.trOk;
+  $('#btnPopTrSave').textContent = m ? 'Çeviriyi nota ekle' : 'İşaretle ve çeviriyi nota ekle';
+  $('#markPop').hidden = false;
+}
+function openPop(p) { pop = p; $('#noteDlg').hidden = true; renderPop(); }
+function closePop() { pop = null; $('#markPop').hidden = true; }
+async function popTranslate() {
+  if (!pop) return;
+  const mine = pop, m = pop.id ? marks.find(x => x.id === pop.id) : null;
+  pop.tr = 'Çevriliyor…'; pop.trOk = false; renderPop();
+  try { mine.tr = await translateText(m ? m.text : pop.sel.text); mine.trOk = true; }
+  catch (e) { mine.tr = (e && /hakkı|alınamadı/.test(e.message)) ? e.message : 'Çeviri için internet bağlantısı gerekiyor'; }
+  if (pop === mine) renderPop();
+}
+$('#btnPopTr').onclick = popTranslate;
+$('#btnPopTrSave').onclick = () => {
+  if (!pop || !pop.trOk) return;
+  let m = pop.id ? marks.find(x => x.id === pop.id) : null;
+  if (m) { m.note = (m.note ? m.note + '\n' : '') + pop.tr; store.set('marks', marks); repaint(); }
+  else { m = createMark(pop.sel, 'yellow', pop.tr); pop = { id: m.id, tr: pop.tr }; }
+  pop.trOk = false;
+  renderPop(); toast('Çeviri nota eklendi');
+};
+$('#btnPopNote').onclick = () => { if (pop && pop.id) openNote(pop.id); };
+$('#btnPopDel').onclick = () => { if (pop && pop.id) removeMark(pop.id); closePop(); toast('İşaret kaldırıldı'); };
+$('#btnPopClose').onclick = closePop;
+
+let noteId = null;
+function openNote(id) {
+  const m = marks.find(x => x.id === id);
+  if (!m) return;
+  noteId = id; closePop(); closePanels();
+  $('#noteQuote').textContent = m.text;
+  $('#noteText').value = m.note || '';
+  $('#noteDlg').hidden = false;
+  setTimeout(() => $('#noteText').focus(), 50);
+}
+$('#btnNoteCancel').onclick = () => { $('#noteDlg').hidden = true; $('#noteText').blur(); };
+$('#btnNoteSave').onclick = () => {
+  const m = marks.find(x => x.id === noteId);
+  if (m) { m.note = $('#noteText').value.trim(); store.set('marks', marks); repaint(); toast(m.note ? 'Not kaydedildi' : 'Not silindi'); }
+  $('#noteDlg').hidden = true; $('#noteText').blur();
+  if (m && !$('#reader').hidden) openPop({ id: m.id });
+};
+
 const press = (el, fn) => el.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); fn(e); });
 $$('#selbar .dot').forEach(d => press(d, () => addMark(d.dataset.color)));
 press($('#btnSentence'), expandToSentence);
+press($('#btnSelTr'), () => { const s = activeSel(); if (!s) return; clearSel(); openPop({ sel: s }); popTranslate(); });
+press($('#btnSelNote'), () => { const s = activeSel(); if (!s) return; const m = createMark(s, 'yellow'); openNote(m.id); });
 
-let popId = null;
-function showMarkPop(id) {
-  const m = marks.find(x => x.id === id);
-  if (!m) return;
-  popId = id;
-  $('#markPopText').textContent = m.text;
-  $('#markPop').hidden = false;
+/* ---------------- Yer imleri ---------------- */
+
+function pageBookmark() {
+  const s = R.cur;
+  return bms.find(b => b.book === R.id && b.ch === s.ch && s.pageOfOffset(b.off) === s.page) || null;
 }
-$('#btnMarkDel').onclick = () => { if (popId) removeMark(popId); $('#markPop').hidden = true; toast('İşaret kaldırıldı'); };
-$('#btnMarkClose').onclick = () => { $('#markPop').hidden = true; };
+function toggleBookmark() {
+  const s = R.cur, here = pageBookmark();
+  if (here) { bms = bms.filter(b => b !== here); toast('Yer imi kaldırıldı'); }
+  else {
+    const off = s.firstOffset();
+    bms.push({
+      id: Date.now().toString(36), book: R.id, bookTitle: meta[R.id].title, ch: s.ch, chTitle: R.book.chapterTitle(s.ch),
+      off, text: s.flow.textContent.slice(off, off + 90).replace(/\s+/g, ' ').trim(), ts: Date.now()
+    });
+    toast('Bu sayfaya yer imi kondu');
+  }
+  store.set('bms', bms);
+  showBars(false); afterMove();
+}
 
 /* ---------------- Dokunma ---------------- */
 
-let down = null;
+let down = null, drag = null;
 const stage = $('#stage');
 stage.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
   down = { x: e.clientX, y: e.clientY, t: Date.now(), sel: !!selRange(), target: e.target };
+  drag = null;
 });
+stage.addEventListener('pointermove', e => {
+  if (!down) return;
+  const dx = e.clientX - down.x, dy = e.clientY - down.y, W = innerWidth;
+  if (!drag) {
+    if (prefs.flip === 'off' || down.sel || selRange() || Math.abs(dx) < 14 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
+    const d = drag = { dir: dx < 0 ? 1 : -1, cy: down.y < innerHeight / 2 ? 0 : innerHeight, f: null, T: null, dead: false, released: false, commit: false };
+    stage.classList.add('dragging');
+    beginTurn(d.dir).then(f => {
+      if (!f) { d.dead = true; return; }
+      d.f = f;
+      if (d.released) finishDrag(d); else if (d.T) drawCurl(f.top.el, d.T, d.cy);
+    });
+  }
+  if (drag.dead) return;
+  // köşe parmağı takip eder (2.2 kat hızla: ekranın yarısı kadar sürüklemek sayfayı çevirir)
+  drag.T = [clamp((drag.dir > 0 ? W : -W) + dx * 2.2, -W, W), drag.cy + dy * 0.6];
+  if (drag.f) drawCurl(drag.f.top.el, drag.T, drag.cy);
+});
+function finishDrag(d) {
+  const W = innerWidth, fwdEnd = d.commit === (d.dir > 0);          // köşe sola mı gidecek?
+  const from = d.T || [(d.dir > 0 ? W : -W), d.cy], to = [fwdEnd ? -W : W, d.cy];
+  const ms = 160 + 420 * Math.abs(to[0] - from[0]) / (2 * W);
+  animateCurl(d.f, d.cy, from, to, ms, 0).then(() => endTurn(d.f, d.commit));
+}
+function releaseDrag(e, cancelled) {
+  const d = drag, W = innerWidth; drag = null;
+  stage.classList.remove('dragging');
+  const dx = e.clientX - down.x, dt = Date.now() - down.t; down = null;
+  if (d.dead) return;
+  const prog = d.T ? (d.dir > 0 ? (W - d.T[0]) : (d.T[0] + W)) / (2 * W) : 0;
+  d.commit = !cancelled && (prog > 0.28 || (dt < 350 && Math.abs(dx) > 40 && (dx < 0) === (d.dir > 0)));
+  d.released = true;
+  if (d.f) finishDrag(d);
+}
 stage.addEventListener('pointerup', e => {
   if (!down) return;
+  if (drag) return releaseDrag(e, false);
   const d = down; down = null;
   const dx = e.clientX - d.x, dy = e.clientY - d.y, dt = Date.now() - d.t;
   if (d.sel || selRange()) return;
   if (Math.abs(dx) > 50 && Math.abs(dx) > 1.5 * Math.abs(dy) && dt < 800) return void turn(dx < 0 ? 1 : -1);
   if (Math.abs(dx) > 12 || Math.abs(dy) > 12 || dt > 350) return;
   // dokunuş
-  if (!$('#markPop').hidden) { $('#markPop').hidden = true; return; }
+  if (!$('#noteDlg').hidden) return;
+  if (!$('#markPop').hidden) return closePop();
   if (!$('#topbar').hidden) return showBars(false);
   const mk = d.target.closest && d.target.closest('mark.hl');
-  if (mk) return showMarkPop(mk.dataset.id);
+  if (mk) return openPop({ id: mk.dataset.id });
   const link = d.target.closest && d.target.closest('a[data-href]');
   if (link) {
     const [p, frag] = link.dataset.href.split('#');
@@ -501,15 +806,18 @@ stage.addEventListener('pointerup', e => {
   const x = e.clientX / innerWidth;
   if (x < 0.28) turn(-1); else if (x > 0.72) turn(1); else showBars(true);
 });
-stage.addEventListener('pointercancel', () => { down = null; });
+stage.addEventListener('pointercancel', e => { if (down && drag) releaseDrag(e, true); else down = null; });
 document.addEventListener('keydown', e => {
-  if ($('#reader').hidden) return;
+  if ($('#reader').hidden || /INPUT|TEXTAREA/.test(e.target.tagName) || !$('#scrim').hidden) return;
   if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') turn(1);
   if (e.key === 'ArrowLeft' || e.key === 'PageUp') turn(-1);
 });
 
 function showBars(on) { $('#topbar').hidden = !on; $('#bottombar').hidden = !on; }
-function hideFloating() { showBars(false); $('#markPop').hidden = true; }
+function hideFloating() { showBars(false); closePop(); }
+
+$('#slider').oninput = e => { $('#progText').textContent = 'Sayfa ' + e.target.value + ' / ' + P.total; };
+$('#slider').onchange = e => { goToPage(+e.target.value); };
 
 /* ---------------- Kitaplık ---------------- */
 
@@ -547,7 +855,8 @@ async function openBook(id, jump) {
   try {
     if (R.id !== id || !R.book) {
       if (R.book) R.book.dispose();
-      R.book = null; sheetA.ch = sheetB.ch = -1; sheetA.page = sheetB.page = 0;
+      R.book = null; P.sig = ''; P.done = false; P.job++;
+      [sheetA, sheetB, sheetM].forEach(s => { s.ch = -1; s.page = 0; });
       const res = await fetch(bridge.url(id));
       if (!res.ok) throw new Error('Dosya okunamadı');
       const book = await Epub.open(await res.arrayBuffer());
@@ -570,8 +879,8 @@ async function openBook(id, jump) {
   $('#loading').hidden = true;
 }
 function closeReader() {
-  getSelection().removeAllRanges();
-  $('#reader').hidden = true; $('#library').hidden = false; $('#selbar').hidden = true;
+  clearSel(); closePop(); $('#noteDlg').hidden = true;
+  $('#reader').hidden = true; $('#library').hidden = false;
   renderLibrary();
 }
 function flashMark(id) {
@@ -585,8 +894,10 @@ window.onImportError = msg => toast(msg || 'Dosya eklenemedi');
 window.handleBack = () => {
   if (!$('#scrim').hidden) { closePanels(); return true; }
   if (!$('#reader').hidden) {
-    if (!$('#markPop').hidden) { $('#markPop').hidden = true; return true; }
-    if (selRange()) { getSelection().removeAllRanges(); return true; }
+    if (!$('#noteDlg').hidden) { $('#noteDlg').hidden = true; return true; }
+    if (!$('#markPop').hidden) { closePop(); return true; }
+    if (selRange()) { clearSel(); return true; }
+    if (!$('#topbar').hidden) { showBars(false); return true; }
     closeReader(); return true;
   }
   return false;
@@ -594,8 +905,8 @@ window.handleBack = () => {
 
 /* ---------------- Paneller ---------------- */
 
-function openPanel(id) { closePanels(); $('#scrim').hidden = false; $(id).hidden = false; showBars(false); }
-function closePanels() { $('#scrim').hidden = true; $$('.panel').forEach(p => { p.hidden = true; }); }
+function openPanel(id) { closePanels(); closePop(); $('#scrim').hidden = false; $(id).hidden = false; showBars(false); }
+function closePanels() { $('#scrim').hidden = true; $$('.panel').forEach(p => { p.hidden = true; }); if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); }
 $('#scrim').onclick = closePanels;
 $$('.panel .close').forEach(b => { b.onclick = closePanels; });
 
@@ -608,52 +919,58 @@ function renderToc() {
     const b = document.createElement('button');
     b.className = 'toc-item' + (i === curIdx ? ' cur' : '');
     b.style.paddingLeft = (t.depth * 18) + 'px';
-    b.textContent = t.label;
+    b.textContent = t.label + (P.done ? '  ·  s. ' + (P.starts[t.ch] + 1) : '');
     b.onclick = () => { closePanels(); goTo({ ch: t.ch, anchor: t.frag }); };
     list.append(b);
   });
 }
 
-function marksFor(bookId) {
-  return marks.filter(m => !bookId || m.book === bookId)
-    .sort((a, b) => a.bookTitle.localeCompare(b.bookTitle, 'tr') || a.ch - b.ch || a.start - b.start);
+const byPlace = (a, b) => a.bookTitle.localeCompare(b.bookTitle, 'tr') || a.ch - b.ch || (a.start || a.off || 0) - (b.start || b.off || 0);
+const marksFor = bookId => marks.filter(m => !bookId || m.book === bookId).sort(byPlace);
+const fmtDate = ts => new Date(ts).toLocaleDateString('tr-TR', { day: 'numeric', month: 'short', year: 'numeric' });
+function jumpTo(m, pos, flash) {
+  const inReader = !$('#reader').hidden && R.id === m.book;
+  closePanels();
+  if (inReader) goTo(pos).then(() => flash && flashMark(flash));
+  else openBook(m.book, Object.assign({ flash }, pos));
 }
 function renderMarks() {
   const inReader = !$('#reader').hidden;
   const list = marksFor(inReader ? R.id : null);
+  const bl = bms.filter(b => !inReader || b.book === R.id).sort(byPlace);
   const box = $('#marksList'); box.replaceChildren();
   $('#marksTitle').textContent = 'İşaretlerim' + (list.length ? ' (' + list.length + ')' : '');
   $('#btnShare').hidden = !list.length;
-  if (!list.length) {
-    const d = document.createElement('div'); d.className = 'panel-empty';
-    d.textContent = 'Henüz işaretlediğin bir cümle yok. Okurken bir cümleye basılı tut, seç ve bir renge dokun.';
-    box.append(d); return;
-  }
   const have = new Set(bridge.list().map(b => b.id));
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  if (bl.length) {
+    box.append(el('div', 'mark-sec', 'Yer imleri'));
+    for (const b of bl) {
+      const it = el('div', 'bm-item'), sp = el('span');
+      sp.append(el('small', '', (inReader ? '' : b.bookTitle + ' · ') + b.chTitle + ' · ' + fmtDate(b.ts)), document.createTextNode(b.text + '…'));
+      it.append(sp);
+      if (have.has(b.book)) { const go = el('button', '', 'Aç'); go.onclick = () => jumpTo(b, { ch: b.ch, off: b.off }); it.append(go); }
+      const del = el('button', '', 'Sil'); del.onclick = () => { bms = bms.filter(x => x !== b); store.set('bms', bms); renderMarks(); if (inReader) afterMove(); };
+      it.append(del); box.append(it);
+    }
+    box.append(el('div', 'mark-sec', 'İşaretlenen cümleler'));
+  }
+  if (!list.length) {
+    box.append(el('div', 'panel-empty', 'Henüz işaretlediğin bir cümle yok. Okurken bir kelimeye basılı tut, seçimi genişlet ve bir renge dokun.'));
+    return;
+  }
   let lastBook = null;
   for (const m of list) {
-    if (!inReader && m.book !== lastBook) {
-      const h = document.createElement('div'); h.className = 'mark-book'; h.textContent = m.bookTitle; box.append(h); lastBook = m.book;
-    }
-    const it = document.createElement('div'); it.className = 'mark-item';
-    const q = document.createElement('blockquote'); q.className = m.color; q.textContent = m.text;
-    const mt = document.createElement('div'); mt.className = 'mark-meta';
-    const info = document.createElement('span');
-    info.textContent = m.chTitle + ' · ' + new Date(m.ts).toLocaleDateString('tr-TR', { day: 'numeric', month: 'short', year: 'numeric' });
-    const acts = document.createElement('span');
-    if (have.has(m.book)) {
-      const go = document.createElement('button'); go.textContent = 'Sayfaya git';
-      go.onclick = () => {
-        closePanels();
-        if (inReader) goTo({ ch: m.ch, off: m.start }).then(() => flashMark(m.id));
-        else openBook(m.book, { ch: m.ch, off: m.start, flash: m.id });
-      };
-      acts.append(go);
-    }
-    const del = document.createElement('button'); del.textContent = 'Sil';
-    del.onclick = () => { removeMark(m.id); renderMarks(); };
-    acts.append(del);
-    mt.append(info, acts); it.append(q, mt); box.append(it);
+    if (!inReader && m.book !== lastBook) { box.append(el('div', 'mark-book', m.bookTitle)); lastBook = m.book; }
+    const it = el('div', 'mark-item');
+    it.append(el('blockquote', m.color, m.text));
+    if (m.note) it.append(el('div', 'mark-note', m.note));
+    const mt = el('div', 'mark-meta'), acts = el('span');
+    mt.append(el('span', '', m.chTitle + ' · ' + fmtDate(m.ts)));
+    if (have.has(m.book)) { const go = el('button', '', 'Sayfaya git'); go.onclick = () => jumpTo(m, { ch: m.ch, off: m.start }, m.id); acts.append(go); }
+    const nt = el('button', '', m.note ? 'Notu düzenle' : 'Not ekle'); nt.onclick = () => openNote(m.id); acts.append(nt);
+    const del = el('button', '', 'Sil'); del.onclick = () => { removeMark(m.id); renderMarks(); }; acts.append(del);
+    mt.append(acts); it.append(mt); box.append(it);
   }
 }
 $('#btnShare').onclick = () => {
@@ -661,49 +978,101 @@ $('#btnShare').onclick = () => {
   let out = '', last = null;
   for (const m of marksFor(inReader ? R.id : null)) {
     if (m.book !== last) { out += (out ? '\n' : '') + '📖 ' + m.bookTitle + '\n\n'; last = m.book; }
-    out += '“' + m.text + '”\n— ' + m.chTitle + '\n\n';
+    out += '“' + m.text + '”\n— ' + m.chTitle + (m.note ? '\nNot: ' + m.note : '') + '\n\n';
   }
   bridge.share(out.trim());
 };
+
+/* kitapta arama */
+let searchJob = 0;
+async function doSearch() {
+  const raw = $('#searchInput').value.trim(), list = $('#searchList'), info = $('#searchInfo');
+  list.replaceChildren();
+  if (raw.length < 2) { info.textContent = 'En az 2 harf yaz.'; return; }
+  $('#searchInput').blur();
+  const job = ++searchJob, book = R.book, loc = /^tr/i.test(book.lang) ? 'tr' : undefined;
+  const low = s => loc ? s.toLocaleLowerCase(loc) : s.toLowerCase();
+  const q = low(raw);
+  let count = 0;
+  for (let ch = 0; ch < book.spine.length && count < 200; ch++) {
+    info.textContent = 'Aranıyor… %' + Math.round(ch / book.spine.length * 100);
+    const T = (await book.fragment(ch)).textContent, L = low(T);
+    if (job !== searchJob || R.book !== book) return;
+    if (L.length !== T.length) continue;
+    for (let i = L.indexOf(q); i >= 0 && count < 200; i = L.indexOf(q, i + q.length)) {
+      count++;
+      const a = Math.max(0, i - 45), b = Math.min(T.length, i + q.length + 60);
+      const hit = document.createElement('button'); hit.className = 'hit';
+      const sm = document.createElement('small'); sm.textContent = book.chapterTitle(ch);
+      const mid = document.createElement('b'); mid.textContent = T.slice(i, i + q.length);
+      hit.append(sm, (a ? '…' : '') + T.slice(a, i).replace(/\s+/g, ' '), mid, T.slice(i + q.length, b).replace(/\s+/g, ' ') + '…');
+      const start = i, end = i + q.length;
+      hit.onclick = async () => {
+        closePanels();
+        await goTo({ ch, off: start });
+        const r = rangeFromOffsets(R.cur.flow, start, end);
+        if (r) { const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }
+      };
+      list.append(hit);
+    }
+    await new Promise(r => setTimeout(r, 0));
+  }
+  info.textContent = count ? count + (count >= 200 ? '+' : '') + ' sonuç bulundu.' : '“' + raw + '” bu kitapta geçmiyor.';
+}
+$('#btnDoSearch').onclick = doSearch;
+$('#searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+/* sayfaya git */
+const doGoto = () => { const v = parseInt($('#gotoInput').value, 10); if (!v) return toast('Bir sayfa numarası yaz'); closePanels(); goToPage(v); };
+$('#btnDoGoto').onclick = doGoto;
+$('#gotoInput').addEventListener('keydown', e => { if (e.key === 'Enter') doGoto(); });
+$$('#panelGoto [data-go]').forEach(b => { b.onclick = () => { closePanels(); goToPage(b.dataset.go === 'first' ? 1 : b.dataset.go === 'last' ? P.total : Math.ceil(P.total / 2)); }; });
 
 $('#btnAdd').onclick = $('#btnAdd2').onclick = () => bridge.pick();
 $('#btnAllMarks').onclick = () => { renderMarks(); openPanel('#panelMarks'); };
 $('#btnBack').onclick = closeReader;
 $('#btnToc').onclick = () => { renderToc(); openPanel('#panelToc'); };
 $('#btnMarks').onclick = () => { renderMarks(); openPanel('#panelMarks'); };
+$('#btnSearch').onclick = () => { openPanel('#panelSearch'); };
+$('#btnGoto').onclick = () => { $('#gotoInput').value = ''; openPanel('#panelGoto'); refreshPages(); };
+$('#btnBm').onclick = toggleBookmark;
 $('#btnSet').onclick = () => openPanel('#panelSet');
 
 /* ---------------- Görünüm ayarları ---------------- */
 
 function applyPrefs(relayout) {
   const st = document.documentElement.style, W = innerWidth;
+  const pad = { dar: Math.max(18, W * 0.03), normal: Math.max(28, W * 0.07), genis: Math.max(40, W * 0.13) }[prefs.margin] || 24;
   st.setProperty('--font-size', prefs.font + 'px');
   st.setProperty('--line-height', prefs.line);
-  st.setProperty('--pad-x', Math.max(28, Math.round(W * 0.06), Math.round((W - 860) / 2)) + 'px');
+  st.setProperty('--pad-x', Math.round(pad) + 'px');
   document.body.className = 'theme-' + prefs.theme;
+  paper = getComputedStyle(document.body).getPropertyValue('--page').trim() || '#f8f1e3';
+  sizeCurl();
   $('#fontVal').textContent = prefs.font + ' pt';
   const seg = (id, v) => $$(id + ' button').forEach(b => b.classList.toggle('on', b.dataset.v === String(v)));
-  seg('#segLine', prefs.line); seg('#segTheme', prefs.theme); seg('#segFlip', prefs.flip);
+  seg('#segLine', prefs.line); seg('#segTheme', prefs.theme); seg('#segFlip', prefs.flip); seg('#segMargin', prefs.margin); seg('#segTr', prefs.tr);
   store.set('prefs', prefs);
-  if (relayout && R.book && !$('#reader').hidden) {
-    const s = R.cur, frac = s.page / s.pages;
-    s.layout(); s.show(Math.min(s.pages - 1, Math.floor(frac * s.pages + 1e-4)));
+  if (relayout && R.book && !$('#reader').hidden && !R.busy) {
+    const s = R.cur, pos = meta[R.id] && meta[R.id].pos;
+    s.layout();
+    if (pos && pos.ch === s.ch && pos.off != null) s.show(s.pageOfOffset(pos.off));
     if (R.other.ch >= 0) R.other.layout();
     afterMove();
   }
 }
 $('#fontMinus').onclick = () => { prefs.font = clamp(prefs.font - 1, 14, 34); applyPrefs(true); };
 $('#fontPlus').onclick = () => { prefs.font = clamp(prefs.font + 1, 14, 34); applyPrefs(true); };
-$$('#segLine button').forEach(b => { b.onclick = () => { prefs.line = parseFloat(b.dataset.v); applyPrefs(true); }; });
-$$('#segTheme button').forEach(b => { b.onclick = () => { prefs.theme = b.dataset.v; applyPrefs(false); }; });
-$$('#segFlip button').forEach(b => { b.onclick = () => { prefs.flip = b.dataset.v; applyPrefs(false); }; });
+const segBind = (id, key, relayout, num) => $$(id + ' button').forEach(b => { b.onclick = () => { prefs[key] = num ? parseFloat(b.dataset.v) : b.dataset.v; applyPrefs(relayout); }; });
+segBind('#segLine', 'line', true, true); segBind('#segMargin', 'margin', true);
+segBind('#segTheme', 'theme', false); segBind('#segFlip', 'flip', false); segBind('#segTr', 'tr', false);
 let rz = 0;
 addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => applyPrefs(true), 150); });
 
 let toastT = 0;
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
-  clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, 2200);
+  clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, 2400);
 }
 
 applyPrefs();

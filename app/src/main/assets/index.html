@@ -32,45 +32,70 @@
 <!-- OKUYUCU -->
 <section id="reader" hidden>
   <div id="stage">
+    <div class="sheet" id="sheetM" aria-hidden="true">
+      <div class="clip"><div class="flow"></div></div>
+      <div class="foot"><span class="foot-ch"></span><span class="foot-pg"></span></div>
+    </div>
     <div class="sheet" id="sheetA">
       <div class="clip"><div class="flow"></div></div>
       <div class="foot"><span class="foot-ch"></span><span class="foot-pg"></span></div>
-      <div class="shade"></div>
     </div>
     <div class="sheet" id="sheetB">
       <div class="clip"><div class="flow"></div></div>
       <div class="foot"><span class="foot-ch"></span><span class="foot-pg"></span></div>
-      <div class="shade"></div>
     </div>
+    <canvas id="curl"></canvas>
+    <div id="ribbon" hidden></div>
   </div>
 
   <div id="topbar" class="bar" hidden>
     <button id="btnBack" class="icon" aria-label="Kitaplığa dön">‹</button>
     <div id="barTitle" class="bar-title"></div>
     <button id="btnToc" class="btn ghost small">İçindekiler</button>
+    <button id="btnSearch" class="btn ghost small">Ara</button>
+    <button id="btnGoto" class="btn ghost small">Sayfaya git</button>
+    <button id="btnBm" class="btn ghost small">Yer imi</button>
     <button id="btnMarks" class="btn ghost small">İşaretlerim</button>
     <button id="btnSet" class="btn ghost small">Aa</button>
   </div>
 
   <div id="bottombar" class="bar bottom" hidden>
     <span id="progText" class="muted"></span>
-    <div class="prog"><div id="progFill"></div></div>
+    <input id="slider" type="range" min="1" max="1" value="1" aria-label="Sayfa kaydırıcı">
   </div>
 
   <div id="selbar" hidden>
-    <span class="sel-label">İşaretle</span>
-    <button class="dot" data-color="yellow" aria-label="Sarı"></button>
-    <button class="dot" data-color="green" aria-label="Yeşil"></button>
-    <button class="dot" data-color="blue" aria-label="Mavi"></button>
-    <button class="dot" data-color="pink" aria-label="Pembe"></button>
+    <button class="dot" data-color="yellow" aria-label="Sarı ile işaretle"></button>
+    <button class="dot" data-color="green" aria-label="Yeşil ile işaretle"></button>
+    <button class="dot" data-color="blue" aria-label="Mavi ile işaretle"></button>
+    <button class="dot" data-color="pink" aria-label="Pembe ile işaretle"></button>
     <button id="btnSentence" class="btn ghost small">Cümleyi seç</button>
+    <button id="btnSelTr" class="btn ghost small">Çevir</button>
+    <button id="btnSelNote" class="btn ghost small">Not ekle</button>
   </div>
 
-  <div id="markPop" hidden>
-    <p id="markPopText"></p>
-    <div class="row">
-      <button id="btnMarkDel" class="btn danger small">İşareti kaldır</button>
-      <button id="btnMarkClose" class="btn ghost small">Kapat</button>
+  <!-- İşaret / çeviri kartı -->
+  <div id="markPop" class="card" hidden>
+    <p id="popText" class="quote"></p>
+    <div id="popNote" class="note-box" hidden></div>
+    <div id="popTr" class="tr-box" hidden></div>
+    <div class="row wrap">
+      <button id="btnPopNote" class="btn solid small">Not ekle</button>
+      <button id="btnPopTr" class="btn ghost small">Çevir</button>
+      <button id="btnPopTrSave" class="btn ghost small" hidden>Çeviriyi nota ekle</button>
+      <button id="btnPopDel" class="btn danger small">İşareti kaldır</button>
+      <button id="btnPopClose" class="btn ghost small">Kapat</button>
+    </div>
+  </div>
+
+  <!-- Not yazma -->
+  <div id="noteDlg" class="card" hidden>
+    <h3>Notun</h3>
+    <p id="noteQuote" class="quote"></p>
+    <textarea id="noteText" rows="4" placeholder="Bu cümle hakkında ne düşünüyorsun?"></textarea>
+    <div class="row wrap end">
+      <button id="btnNoteCancel" class="btn ghost small">Vazgeç</button>
+      <button id="btnNoteSave" class="btn solid small">Notu kaydet</button>
     </div>
   </div>
 
@@ -94,6 +119,35 @@
   <div id="marksList" class="panel-body"></div>
 </aside>
 
+<aside id="panelSearch" class="panel" hidden>
+  <header><h2>Kitapta ara</h2><button class="icon close" aria-label="Kapat">×</button></header>
+  <div class="panel-body">
+    <div class="row field">
+      <input id="searchInput" type="search" placeholder="Kelime ya da cümle yaz" autocomplete="off">
+      <button id="btnDoSearch" class="btn solid small">Ara</button>
+    </div>
+    <p id="searchInfo" class="muted small-text"></p>
+    <div id="searchList"></div>
+  </div>
+</aside>
+
+<aside id="panelGoto" class="panel" hidden>
+  <header><h2>Sayfaya git</h2><button class="icon close" aria-label="Kapat">×</button></header>
+  <div class="panel-body">
+    <p id="gotoInfo" class="muted"></p>
+    <div class="row field">
+      <input id="gotoInput" type="number" inputmode="numeric" min="1" placeholder="Sayfa numarası">
+      <button id="btnDoGoto" class="btn solid small">Sayfayı aç</button>
+    </div>
+    <div class="row wrap quick">
+      <button class="btn ghost small" data-go="first">Kitabın başı</button>
+      <button class="btn ghost small" data-go="mid">Ortası</button>
+      <button class="btn ghost small" data-go="last">Son sayfa</button>
+    </div>
+    <p class="muted small-text">Sayfa numaraları ekranına ve yazı boyutuna göre hesaplanır; yazı boyutunu değiştirirsen sayfa sayısı da değişir.</p>
+  </div>
+</aside>
+
 <aside id="panelSet" class="panel" hidden>
   <header><h2>Görünüm</h2><button class="icon close" aria-label="Kapat">×</button></header>
   <div class="panel-body">
@@ -107,13 +161,21 @@
     <div class="row seg" id="segLine">
       <button data-v="1.45">Sıkı</button><button data-v="1.65">Normal</button><button data-v="1.9">Geniş</button>
     </div>
+    <label class="set-label">Kenar boşluğu</label>
+    <div class="row seg" id="segMargin">
+      <button data-v="dar">Dar</button><button data-v="normal">Normal</button><button data-v="genis">Geniş</button>
+    </div>
     <label class="set-label">Tema</label>
     <div class="row seg" id="segTheme">
       <button data-v="paper">Kâğıt</button><button data-v="white">Beyaz</button><button data-v="night">Gece</button>
     </div>
-    <label class="set-label">Sayfa çevirme efekti</label>
+    <label class="set-label">Sayfa çevirme</label>
     <div class="row seg" id="segFlip">
-      <button data-v="on">Açık</button><button data-v="off">Kapalı</button>
+      <button data-v="on">Kıvrılan sayfa</button><button data-v="off">Efektsiz</button>
+    </div>
+    <label class="set-label">Çeviri dili</label>
+    <div class="row seg" id="segTr">
+      <button data-v="tr">Türkçe</button><button data-v="en">İngilizce</button>
     </div>
   </div>
 </aside>

@@ -67,6 +67,7 @@ class MainActivity : Activity() {
         }
         web.addJavascriptInterface(Bridge(), "Android")
         setContentView(web)
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) // okurken ekran kararmasın
         hideSystemBars()
 
         web.loadUrl("https://appassets.androidplatform.net/assets/index.html")
